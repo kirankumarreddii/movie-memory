@@ -1,0 +1,98 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- Auth.js (NextAuth) tables -------------------------------------------
+// Account / Session / VerificationToken follow the shape the Prisma adapter
+// expects. User carries our one piece of product data: the favorite movie.
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+
+  // null => onboarding not completed yet. This is the single source of truth
+  // for "first-time user", so an abandoned onboarding is resumed next login.
+  favoriteMovie String?   @db.VarChar(200)
+
+  accounts      Account[]
+  sessions      Session[]
+  facts         Fact[]
+  factLock      FactGenerationLock?
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// --- Product tables ------------------------------------------------------
+
+// Append-only history of generated facts. `movie` is a snapshot of the title
+// the fact was generated for, so the cache is keyed on (user, movie) and a
+// future movie change can never serve a fact about the old movie.
+model Fact {
+  id        String   @id @default(cuid())
+  userId    String
+  movie     String   @db.VarChar(200)
+  content   String   @db.Text
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Serves "latest fact for this user + movie" as an index-only lookup.
+  @@index([userId, movie, createdAt(sort: Desc)])
+}
+
+// At most one row per user: a short-lived lease that marks "a fact is being
+// generated right now". Acquired with a conditional upsert (see
+// src/lib/facts/prisma-repository.ts), so it works across tabs, processes and
+// server instances. `expiresAt` lets a crashed holder's lease lapse on its own.
+model FactGenerationLock {
+  userId    String   @id
+  token     String
+  // timestamptz so the raw-SQL comparison in tryAcquireLock is unambiguous.
+  expiresAt DateTime @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
